@@ -1,0 +1,353 @@
+
+import matplotlib.pyplot as plt
+import seaborn as sns
+from matplotlib.patches import Circle
+import pandas as pd
+import os
+
+# This function takes a list of age of the donors and
+# divide the data into six developmental stages based on previous literature
+
+def assign_stage(age_label):
+    # if the age donor includes pcw this is labeled prenatal
+    if "pcw" in age_label:
+        return "Prenatal"
+    # ages 0 months to 1 year are infancy
+    elif "mos" in age_label:
+        return "Infancy"
+    elif "yrs" in age_label:
+        years = int(age_label.replace("yrs", "").strip())
+        if years <= 1:
+            return "Infancy"
+        # between 1 and 8 is categorized as childhood
+        elif years <= 11:
+            return "Childhood"
+        # above 8 until 18 consdired adolescence
+        elif years <= 18:
+            return "Adolescence"
+        #above 18 up to 30 is emerging adulthood
+        elif years <= 30:
+            return "Emerging Adulthood"
+        # above 30: late adulthood
+        else:
+            return "Adulthood"
+    else:
+        return "Unknown"
+
+# This function is for loading the data and merging the gene expression preparing for further analysis
+# it takes the paths of downloaded data from Allen Portal
+def load_annotate(columns_path, expression_path):
+   # loading the data downloaded from allen brain atlas (Columns)
+    df = pd.read_csv(columns_path)
+    # loading the data for expression values (row)
+    expr = pd.read_csv(expression_path, header=None)
+   # extracting the expression values as a list
+    expr_values = expr.iloc[0, 1:].tolist()
+   # adding the expression values to the column dataset to have a column with expression value
+    df["Gene Expression"] = expr_values
+   # count the number of Donors in total
+    num_donors = df['donor_id'].nunique()
+   # look at the number of data for each donor
+    donor_counts = df.groupby('donor_id').size().rename('n')
+   # filtter out donors that have less than 4 points only
+    keep_ids = donor_counts[donor_counts > 4].index
+    df = df[df['donor_id'].isin(keep_ids)].copy()
+   # adding a column that categorize the age to diffrent developmental stages based on the defintion from before
+    df["stage"] = df["donor_age"].apply(assign_stage)
+   # final number of donors in the set after applying the criterion
+    num_donors_filtered = df['donor_id'].nunique()
+    # save the final processed dataset for further analysis
+    out_path = r"C:\Users\reemh\Desktop\BDD Data\Data of TMEM132D of Developmental human brain\TMEM132D_developmental.csv"
+    df.to_csv(out_path, index=False)
+   # Count number of  donors contributing for each developmental stage
+    stage_donor_counts = df.groupby("stage")["donor_id"].nunique()
+   # save the information
+    stage_donor_counts.to_csv(os.path.join(save_directory, f"{gene_name}_Donor_Counts_Per_Stage.csv"))
+    return df
+
+# This function calculate the average expression across region and developmental stage
+# it takes the processed data , a list of region of interst and the order of developmental satges
+def collect_expression(df, region_keywords, stage_order):
+    # create empty lists to save results
+    means = {}
+    sems = {}
+    # go through each ROI
+    for region in region_keywords:
+        # filter out the data for this ROI across all donors
+        region_df = df[df["structure_name"].str.contains(region.lower(), na=False, regex=False)]
+        # if data is unavaliable for this region continue to the next ROI
+        if region_df.empty or region_df["Gene Expression"].dropna().empty:
+            print(f"No data for region {region}")
+            continue
+        # One the data filtered , group the data points by the developmental stage
+        grouped = region_df.groupby("stage")["Gene Expression"]
+        # get the mean for that ROI in each of the developmental stages
+        means[region] = grouped.mean().reindex(stage_order)
+        # calculate the standard error of mean for that ROI across developmental stages
+        sems[region] = grouped.sem().reindex(stage_order)
+    # create datasets containing the calculated means and SEM for further analysis
+    mean_df = pd.DataFrame.from_dict(means, orient="index")
+    sem_df = pd.DataFrame.from_dict(sems, orient="index")
+    return mean_df, sem_df
+
+# This function count the donors numbers in each ROI and stage
+def count_donors_per_region_stage(df, region_keywords, stage_order):
+    donor_counts = {}
+    # for each region
+    for region in region_keywords:
+        # filter the data for that region
+        region_df = df[df["structure_name"].str.contains(region.lower(), na=False, regex=False)]
+        # group the filtered data for the ROI based on developmental stages
+        grouped = region_df.groupby("stage")["donor_id"].nunique()
+        # conunt the donors numbers in each developmental stage for the ROI
+        donor_counts[region] = grouped.reindex(stage_order).fillna(0)
+    # save the results
+    donor_df = pd.DataFrame.from_dict(donor_counts, orient="index")
+    donor_df.to_csv(os.path.join(save_directory, f"Donor_Counts_Per_Region_Stage_{df['Gene Expression'].name if hasattr(df['Gene Expression'], 'name') else 'Unnamed'}.csv"))
+    return donor_df
+
+
+# This function takes the processed dataset which contains averages for each ROI in each developmental stage
+# and accordingly calculate the z-score
+def zscore(df):
+    print(df)
+    return df.apply(lambda x: (x - x.mean()) / x.std(), axis=1)
+
+# This function is to save the processed data accordingly
+def save_data(mean_df, sem_df, zscore_df, gene_name, region_map, save_dir):
+    # Rename index from long region names to short ones for consistency
+    mean_df = mean_df.rename(index=region_map)
+    sem_df = sem_df.rename(index=region_map)
+    zscore_df = zscore_df.rename(index=region_map)
+    # Reset index to turn region names into a column and rename that column
+    mean_df_reset = mean_df.reset_index().rename(columns={'index': 'Region'})
+    sem_df_reset = sem_df.reset_index().rename(columns={'index': 'Region'})
+    zscore_df_reset = zscore_df.reset_index().rename(columns={'index': 'Region'})
+
+    # Save DataFrames
+    mean_df_reset.to_csv(f"{save_dir}/{gene_name}_Region_Means.csv", index=False)
+    sem_df_reset.to_csv(f"{save_dir}/{gene_name}_Region_SEMs.csv", index=False)
+    zscore_df_reset.to_csv(f"{save_dir}/{gene_name}_Region_ZScores.csv", index=False)
+
+
+
+# This function creates the heatmap with log2 RPKM values across regions and developmental stages
+def plot_heatmap_raw(df_raw, gene_name):
+
+
+    # Grouped ROIs by function
+    region_groups = {
+        "Frontal": ["dPFC", "vPFC", "mPFC (ACC)", "OFC"],
+        "Limbic": ["Amygdala", "Hippocampus"],
+        "Control": ["Visual Cortex", "Cerebellum"]
+    }
+
+    # Order regions and calculate group positions for border lines between major regions
+    ordered_regions = []
+    group_positions = []
+    current_position = 0
+    for group, regions in region_groups.items():
+        ordered_regions.extend(regions)
+        current_position += len(regions)
+        group_positions.append((group, current_position))
+
+    # rearrange the dataframe to improve region order
+    df = df_raw.rename(index=region_map)
+    df = df.loc[ordered_regions]
+
+    # Create the heatmap plot
+    plt.figure(figsize=(14, 9))
+    ax = sns.heatmap(
+        df,
+        cmap="YlGnBu",
+        annot=True,
+        fmt=".2f",
+        linewidths=0.5,
+        cbar_kws={"label": "Mean Expression (log₂ RPKM)"},
+        annot_kws={"fontsize": 16, "color": "black"}
+    )
+
+    # setting title of Colorbar
+    cbar = ax.collections[0].colorbar
+    cbar.set_label("Mean Expression (log₂ RPKM)", fontsize=18)
+    cbar.ax.tick_params(labelsize=18)
+
+    # calculting the maximum average across stages for each region and mark it with black circle
+    data = df.values
+    n_rows, n_cols = data.shape
+    for i in range(n_rows):
+        j = data[i].argmax()
+        circ = Circle((j + 0.5, i + 0.5), radius=0.4, fill=False, edgecolor='black', linewidth=2)
+        ax.add_patch(circ)
+
+    # add the horizontal border lines to define major region groups
+    for group, pos in group_positions[:-1]:
+        ax.hlines(pos, *ax.get_xlim(), color='black', linewidth=3)
+
+    # add the major region labels on the left
+    yticks = ax.get_yticks()
+    region_indices = {label: i for i, label in enumerate(df.index)}
+    label_positions = {
+        "Frontal": (yticks[region_indices["dPFC"]] + yticks[region_indices["OFC"]]) / 2,
+        "Limbic": (yticks[region_indices["Amygdala"]] + yticks[region_indices["Hippocampus"]]) / 2,
+        "Control": (yticks[region_indices["Visual Cortex"]] + yticks[region_indices["Cerebellum"]]) / 2
+    }
+    for group, y in label_positions.items():
+        ax.text(-1.25, y, group, fontsize=18, fontweight='bold', va='center', ha='right', rotation=90)
+
+    # set titles of the figure and axises
+    ax.set_title(f"Developmental Expression of {gene_name} Across Brain Regions", fontsize=22, fontweight='bold')
+    ax.set_xlabel("Developmental Stage", fontsize=20)
+    ax.set_ylabel("Brain Region", fontsize=20, labelpad=50)
+    ax.set_xticklabels(ax.get_xticklabels(), rotation=45, ha='right', fontsize=18)
+    ax.tick_params(axis='y', labelsize=18)
+
+    # Save and show
+    plt.tight_layout()
+    plt.savefig(os.path.join(save_directory, f"{gene_name}_heatmap_raw.pdf"), dpi=300, bbox_inches='tight')
+    plt.show()
+
+
+#This function plot a boxplot of the gene expression in major regions across the developmental stages
+def plot_grouped_boxplot(zscore_df, gene_name, stage_order):
+    # Define grouped ROIs based on functions
+    region_groups = {
+        "Frontal": ["dPFC", "vPFC", "mPFC (ACC)", "OFC"],
+        "Limbic": ["Amygdala", "Hippocampus"],
+        "Control": ["Visual Cortex", "Cerebellum"]
+    }
+
+    # create a dict to map each ROI to its group
+    region_to_group = {r: g for g, rs in region_groups.items() for r in rs}
+
+    # Reshape the z-score for plotting
+    z_long = zscore_df.reset_index().melt(id_vars="index", var_name="Stage", value_name="Zscore")
+    z_long = z_long.rename(columns={"index": "Region"})
+
+    # map each ROI to its major group (Frontal, Limbic, Control) based on the dict created
+    z_long["Group"] = z_long["Region"].map(region_to_group)
+
+    # make sure the stages appear in the correct order on the x-axis
+    z_long["Stage"] = pd.Categorical(z_long["Stage"], categories=stage_order, ordered=True)
+
+    # define custom color for each developmental stage
+    stage_colors = {
+        "Prenatal": "#e41a1c",         # red
+        "Infancy": "#377eb8",          # blue
+        "Childhood": "#4daf4a",        # green
+        "Adolescence": "#ff7f00",      # orange
+        "Emerging Adulthood": "#f781bf", # pink
+        "Adulthood": "#a65628"         # brown
+    }
+
+    # create three subplots one for each major region
+    fig, axs = plt.subplots(3, 1, figsize=(12, 14), sharex=True)
+
+    # figure title
+    fig.suptitle(f"{gene_name} Average Z-score Expression in Major\nRegions Across Developmental Stages",
+                 fontsize=22, fontweight='bold')
+
+    # go through each major group and plot separately
+    for ax, group in zip(axs, ["Frontal", "Limbic", "Control"]):
+        gdata = z_long[z_long["Group"] == group]
+
+        # boxplot to show the distribution of ROI z-scores at each stage
+        sns.boxplot(
+            data=gdata, x="Stage", y="Zscore", ax=ax,
+            order=stage_order,
+            palette=[stage_colors[s] for s in stage_order],
+            fliersize=0
+        )
+
+        # add the distribution of ROIs as dots
+        sns.stripplot(
+            data=gdata, x="Stage", y="Zscore", ax=ax,
+            order=stage_order,
+            color='black', size=8, jitter=True
+        )
+
+        # horizontal line at z-score = 0
+        ax.axhline(0, color='gray', linestyle='--', linewidth=1)
+
+        # subplot title for the region group
+        ax.set_title(f"{group} Regions", fontsize=18, fontweight='bold')
+
+
+        # Set y-axis range and tick sizes
+        ax.set_ylim(-2.5, 2.5)
+        ax.tick_params(axis='x', rotation=45, labelsize=20)
+        ax.tick_params(axis='y', labelsize=20)
+
+    # remove subplot axis labels
+    for ax in axs:
+        ax.set_ylabel("")
+        ax.set_xlabel("")
+
+    # add one shared y-axis label for the figure
+    fig.text(0.02, 0.55, "Average Z-scored Expression", va='center', rotation='vertical', fontsize=20)
+
+    # add one shared x-axis label for developmental stages
+    fig.supxlabel("Developmental Stage", fontsize=20)
+
+    plt.tight_layout(rect=[0.05, 0.02, 1, 0.95])
+    # Save the figure as a high-quality PDF
+    plt.savefig(f"C:/Users/reemh/Desktop/BDD Data/Paper_Final_figures/{gene_name}_Boxplot_Grouped.pdf", dpi=300)
+    plt.show()
+
+
+
+# This section is the main excution of all the above functions
+
+# Regions of interst (ROIs) list
+
+regions = [
+    "dorsolateral prefrontal cortex",
+    "ventrolateral prefrontal cortex",
+    "anterior (rostral) cingulate (medial prefrontal) cortex",
+    "orbital frontal cortex",
+    "amygdaloid complex",
+    "hippocampus (hippocampal formation)",
+    "primary visual cortex",
+    "cerebellar cortex"
+]
+
+# Shortend names of ROIs for plots
+region_map = {
+    "dorsolateral prefrontal cortex": "dPFC",
+    "ventrolateral prefrontal cortex": "vPFC",
+    "anterior (rostral) cingulate (medial prefrontal) cortex": "mPFC (ACC)",
+    "orbital frontal cortex": "OFC",
+    "amygdaloid complex": "Amygdala",
+    "hippocampus (hippocampal formation)": "Hippocampus",
+    "primary visual cortex": "Visual Cortex",
+    "cerebellar cortex": "Cerebellum"
+}
+
+# a list that order the developmental stages
+stage_order = ["Prenatal", "Infancy", "Childhood", "Adolescence", "Emerging Adulthood", "Adulthood"]
+# the path to save the results
+save_directory = r"C:\Users\..."
+
+for gene_name, columns_path, expression_path in \
+    # path to columns and expression data downloaded from Allen portal
+    [("TMEM132D", r"C:\\Users...",
+     r"C:\\Users\\...)]:
+    # get the processd data with grouped developmental stages
+    df = load_annotate(columns_path, expression_path)
+    # get the donors count for each stage and ROI
+    donor_df = count_donors_per_region_stage(df, regions, stage_order)
+    # get the average gene expression and SEM for each Region at each stage
+    means_df, sems_df = collect_expression(df, regions, stage_order)
+    # calculate the z-score for the averages for better comparison across ROIs and developmental stages
+    zscores_df = zscore(means_df)
+    # save the data collected
+    save_data(means_df, sems_df, zscores_df, gene_name, region_map, save_directory)
+    zscores_renamed = zscores_df.rename(index=region_map)
+    # plot the heatmap of average log2 RPKM values
+    plot_heatmap_raw(means_df, gene_name)
+    # plot a boxplot of z-scored expression values
+    plot_grouped_boxplot(zscores_renamed, gene_name,stage_order)
+
+
+
+

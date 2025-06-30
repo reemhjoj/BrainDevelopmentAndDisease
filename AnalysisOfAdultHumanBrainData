@@ -1,0 +1,206 @@
+import os
+import re
+import numpy as np
+import pandas as pd
+import seaborn as sns
+import matplotlib.pyplot as plt
+from scipy.stats import sem, spearmanr, pearsonr
+
+#  Mapping Regions of interest (ROIs) with their anatomical substructures
+ROI_SUBREGIONS = {
+    'dPFC': ["middle frontal gyrus", "superior frontal gyrus"],
+    'vPFC': ['inferior frontal gyrus'],
+    'mPFC': ['gyrus rectus', 'medial orbital gyrus', 'cingulate gyrus, frontal part'],
+    'OFC': ["medial orbital gyrus", "lateral orbital gyrus"],
+    'Amygdala': ["basolateral nucleus", "basomedial nucleus", "central nucleus", "cortico-medial group"],
+    'Hippocampus': ["ca1 field", "dentate gyrus", "ca2 field", "ca3 field"],
+    'cerebellar cortex': ['I-II', 'III', 'IV', 'V', 'VI',
+                          'III, left, paravermis', 'III, right, paravermis',
+                          'IV, left, paravermis', 'IV, right, paravermis',
+                          'V, left, paravermis', 'V, right, paravermis',
+                          'VI, left, paravermis', 'VI, right, paravermis'],
+    'visual cortex': ["cuneus", "lingual gyrus"]
+}
+
+# Path to where to save the results
+RESULTS_DIR = r"C:\\Users\\..."
+
+
+# This function takes the paths to the columns and expression files downloaded from
+# Allen portal for the gene of interest and merge the expression level into the data
+# including the donors and regions information to allow for further processing and analysis of the data
+
+
+
+def merge_expression_with_metadata(columns_path, expressions_path, gene_name):
+    # Read the data downloaded from Allen Human Brain atlas as dataframes
+    columns_df =  pd.read_csv(columns_path)
+    expressions_df = pd.read_csv(expressions_path, header=None)
+
+    # extract each of the probes and name it accordingly
+    probe1 = expressions_df.iloc[0, 1:].values
+    probe2 = expressions_df.iloc[1, 1:].values
+
+    # create a dataframe that include both probes as columns
+    probes_df = pd.DataFrame({
+        f"{gene_name}_probe1": probe1,
+        f"{gene_name}_probe2": probe2
+    })
+
+    # create a third column in the dataframe calculating the average of the probes
+    probes_df[f"{gene_name}_avg"] = probes_df.mean(axis=1)
+
+    # Combine the dataframe of probes with the full data
+    min_len = min(len(columns_df), len(probes_df))
+    columns_df = columns_df.iloc[:min_len].reset_index(drop=True)
+    probes_df = probes_df.iloc[:min_len].reset_index(drop=True)
+    full_df = pd.concat([columns_df, probes_df], axis=1)
+
+    # uniform all structure names to be lower cases to facilitate the search
+    full_df['structure_name'] = full_df['structure_name'].astype(str).str.lower().str.strip()
+    #create a new column that include the uniformed list with shortend names of the structures
+    full_df['structure_short'] = full_df['structure_name'].str.split(',', n=1).str[0].str.strip()
+    return full_df
+
+# This function takes a processed data and gene of intersets to plot
+# a bar plot of average gene expression across major regions
+def plot_expression(df, gene_name):
+    # ROIs groupes based on their function to create the major regions
+    grouped_regions = {
+        "Frontal": ['dPFC', 'vPFC', 'mPFC', 'OFC'],
+        "Limbic": ['Amygdala', 'Hippocampus'],
+        "Control": ['cerebellar cortex', 'visual cortex']
+    }
+    # averages of gene of interest
+    col = f'{gene_name}_avg'
+    # empty list to save all data for plotting in it
+    plot_data = []
+
+    # for every major regions and its relevant ROIs
+    for label, keys in grouped_regions.items():
+        # get the subregions constituting the ROIs in a list
+        subregions = [s.lower() for s in sum([ROI_SUBREGIONS[r] for r in keys], [])]
+
+        # Keep only valid subregions which are present for all  6 donors
+        subregion_counts = df.groupby('structure_short')['donor_name'].nunique()
+        donor_count = df['donor_name'].nunique()
+        valid_subregions = [s for s in subregions if subregion_counts.get(s.lower(), 0) == donor_count]
+        # filter the expression values for these subregions
+        filter = df['structure_short'].apply(lambda x: x in valid_subregions)
+        subset = df[filter]
+        # for each donor
+        for (donor, age), group in subset.groupby(['donor_name', 'donor_age']):
+            # get the donor age as a number
+            donor_age = int(re.search(r'\d+', str(age)).group())
+            # get the expression values for the donor
+            values = group[col].dropna()
+            # add the relevant data in the list for plotting later
+            plot_data.append({
+                'DonorAge': donor_age,
+                'Region': label,
+                'Mean': values.mean(),
+                'SEM': sem(values)
+            })
+
+    # plot the prepared data
+    plot_df = pd.DataFrame(plot_data)
+    # to ensure plotting doners age from younger to older
+    donor_order = sorted(plot_df['DonorAge'].unique())
+    # each donor depicted in unique color
+    donor_colors = {
+        24: '#66c2a5', 31: '#fc8d62', 39: '#8da0cb',
+        49: '#e78ac3', 55: '#a6d854', 57: '#ffd92f'
+    }
+   # creating the figure for bar plot
+    plt.figure(figsize=(14, 8))
+    # creating the bar plot
+    ax = sns.barplot(
+        data=plot_df, x="Region", y="Mean", hue="DonorAge",
+        palette=[donor_colors.get(age, "gray") for age in donor_order],
+        hue_order=donor_order, ci=None, dodge=True
+    )
+    # setting a suitable bar width
+    bar_width = 0.8 / len(donor_order)
+    tick_locs = {t.get_text(): t.get_position()[0] for t in ax.get_xticklabels()}
+    for i, row in plot_df.iterrows():
+        base_x = tick_locs[row['Region']]
+        offset = -0.4 + bar_width / 2 + donor_order.index(row['DonorAge']) * bar_width
+        ax.errorbar(base_x + offset, row['Mean'], yerr=max(row['SEM'], 0.05), fmt='none', ecolor='gray', capsize=4)
+    # plot title
+    title = f"Mean Expression of {gene_name} Across Brain Regions"
+    # setting the axis labels ant ticks
+    ax.set_title(title, fontsize=23, fontweight="bold")
+    ax.set_ylabel("Mean Expression (log₂ RPKM)", fontsize=20)
+    ax.set_xlabel('Brain Region', fontsize=20)
+    ax.tick_params(axis='both', labelsize=16)
+    ax.legend(title='Donor Age', title_fontsize=16, fontsize=14)
+    ax.grid(True, linestyle='--', alpha=0.5)
+    plt.tight_layout()
+    # saving the plot as pdf
+    plt.savefig(os.path.join(RESULTS_DIR, f"{gene_name}_expression_plot_raw.pdf"))
+    plt.show()
+    return plot_df
+
+
+
+# This functions allows for calculating the correlation between gene expression
+# and age in major region by taking a processed dataframe of the gene of interest
+def compute_age_correlation_by_region(df, gene_name):
+    # extracting the donors ages from the processed datset without the word "years"
+    df['donor_age_num'] = df['donor_age'].astype(str).str.extract(r"(\d+)").astype(float)
+    # grouped ROIs for major regions
+    grouped_regions = {
+        "Frontal": ['dPFC', 'vPFC', 'mPFC', 'OFC'],
+        "Limbic": ['Amygdala', 'Hippocampus'],
+        "Control": ['cerebellar cortex', 'visual cortex']
+    }
+    # empty list to save the calculated correlations
+    results = []
+    col = f'{gene_name}_avg'
+
+    for group, keys in grouped_regions.items():
+        # get the subregions constituting the ROIs in a list
+        subregions = [s.lower() for s in sum([ROI_SUBREGIONS[r] for r in keys], [])]
+
+        # Keep only valid subregions which are present for all  6 donors
+        subregion_counts = df.groupby('structure_short')['donor_name'].nunique()
+        donor_count = df['donor_name'].nunique()
+        valid_subregions = [s for s in subregions if subregion_counts.get(s.lower(), 0) == donor_count]
+        # filter the valid regions and their expression values for all donors
+        filter = df['structure_short'].apply(lambda x: x in valid_subregions)
+        region_df = df[filter]
+        # calculate the average across all valid regions for major region, for each donor
+        donor_means = (
+            region_df.groupby(['donor_name', 'donor_age_num'])[col]
+            .mean().reset_index(name='mean_expr')
+        )
+        # if means are avaliable  calculate the spearman correlation fot the major region
+        if len(donor_means) > 1:
+            r, p = spearmanr(donor_means['donor_age_num'], donor_means['mean_expr'])
+        else:
+            r, p = np.nan, np.nan
+        # save the correlation result for each major region
+        results.append({
+            'Region': group,
+            'n_donors': len(donor_means),
+            'Spearman_r': r,
+            'p_value': p
+        })
+    # create dataframe of the correlation results to save
+    corr_df = pd.DataFrame(results)
+    corr_df.to_csv(os.path.join(RESULTS_DIR, f"{gene_name}_age_expression_correlation.csv"), index=False)
+    print("Age-expression correlation results:")
+    print(corr_df)
+    return corr_df
+
+# This section is the main section for excuting the functions
+expression_df = merge_expression_with_metadata(
+    # paths to the downloaded data of columns and expression
+    r"C:\\Users\\...",
+    r"C:\\Users\\...",
+    gene_name="TMEM132D")
+plot_df =plot_expression(expression_df, "TMEM132D")
+# calculate mean and standard deviation for each major region across donors
+summary_stats = plot_df.groupby('Region').agg( Mean_Expression=('Mean', 'mean'), Std_Deviation=('Mean', 'std')).reset_index()
+# function to run the correlation Pearson test
+compute_age_correlation_by_region(expression_df, "TMEM132D")
